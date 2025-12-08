@@ -1,0 +1,89 @@
+
+# ==========================
+# Python / FastAPI
+# ==========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pdb
+*.pytest_cache/
+*.pytest_cache/
+*.pyc
+
+# Directorios de builds
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ==========================
+# Entornos virtuales
+# ==========================
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# ==========================
+# Configuración / secretos
+# ==========================
+.env
+.env.*
+!.env.example
+
+# ==========================
+# Logs / runtime
+# ==========================
+*.log
+logs/
+*.pid
+*.sqlite3
+
+# Uvicorn / Gunicorn
+*.db
+instance/
+*.db-journal
+
+# ==========================
+# Herramientas / IDEs
+# ==========================
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ==========================
+# Tests / coverage
+# ==========================
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+coverage.xml
+*.cover
+.hypothesis/
+
+# ==========================
+# Docker
+# ==========================
+docker-data/
+*.bak
+
+# ==========================
+# Alembic / Migrations (opcional)
+# Si quieres versionar migrations, comenta esto
+# ==========================
+alembic.ini
+alembic/*.log
+alembic/versions/*.pyc
+
+# ==========================
+# Otros
+# ==========================
+*.DS_Store
