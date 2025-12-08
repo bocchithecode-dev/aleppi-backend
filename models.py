@@ -27,11 +27,12 @@ class ProfessionalBase(SQLModel):
     specialty: str
     years_experience: int = 0
     degree: Optional[str] = None
-    license_number: Optional[str] = None
-    license_file_path: Optional[str] = None
+    license_number: Optional[str] = None          
+    license_file_path: Optional[str] = None       
     state: str
     city: str
     mobile_phone: str
+    active: bool
 
 
 class Professional(ProfessionalBase, table=True):

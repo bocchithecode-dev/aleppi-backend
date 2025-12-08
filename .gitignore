@@ -87,3 +87,4 @@ alembic/versions/*.pyc
 # Otros
 # ==========================
 *.DS_Store
+uploads/*

@@ -34,3 +34,7 @@ class ProfessionalRead(BaseModel):
 
     class Config:
         orm_mode = True
+
+
+class ProfessionalStatusUpdate(BaseModel):
+    active: bool
