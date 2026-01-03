@@ -13,4 +13,4 @@ email-validator
 python-multipart
 aiofiles
 
-stripe
+stripe==11.5.0
