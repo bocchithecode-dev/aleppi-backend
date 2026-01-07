@@ -1,12 +1,17 @@
+
 # auth/schemas.py
 from typing import Optional
 from pydantic import BaseModel, ConfigDict, EmailStr
 from typing import List
 from stripe_local.schemas import StripeSubscriptionRead
+
 class Token(BaseModel):
     access_token: str
+    refresh_token: str
     token_type: str = "bearer"
 
+class RefreshRequest(BaseModel):
+    refresh_token: str
 
 class LoginRequest(BaseModel):
     email: EmailStr

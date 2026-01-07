@@ -13,12 +13,13 @@ from .schemas import (
     Token,
     LoginRequest,
     ForgotPasswordRequest,
-    ResetPasswordRequest,
+    ResetPasswordRequest,RefreshRequest
 )
 
 SECRET_KEY = "CAMBIA_ESTA_CLAVE_SUPER_SECRETA"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
+REFRESH_TOKEN_EXPIRE_DAYS = 14
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -34,6 +35,19 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
 
+
+def _encode_token(payload: dict, expires_delta: timedelta) -> str:
+    now = datetime.now()
+    payload = {
+        **payload,
+        "jti": str(uuid4()),
+        "iat": int(now.timestamp()),
+        "nbf": int(now.timestamp()),
+        "exp": int((now + expires_delta).timestamp()),
+        "iss": "aleppi-backend",
+        "aud": "aleppi-frontend",
+    }
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 def create_access_token(*, user_id: int, role: int, email: str, active: bool) -> str:
     now = datetime.now()
@@ -51,6 +65,16 @@ def create_access_token(*, user_id: int, role: int, email: str, active: bool) ->
     }
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
+
+
+def create_refresh_token(*, user_id: int) -> str:
+    return _encode_token(
+        {
+            "sub": str(user_id),
+            "type": "refresh",
+        },
+        expires_delta=timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS),
+    )
 
 def get_user_by_email(session: Session, email: str) -> Optional[User]:
     statement = select(User).where(User.email == email)
@@ -72,15 +96,18 @@ def login(payload: LoginRequest, session: Session = Depends(get_session)):
     if not user or not verify_password(payload.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Credenciales inválidas")
 
-    # IMPORTANTÍSIMO: checar aquí también
     if not user.is_active:
         raise HTTPException(status_code=401, detail="Usuario inactivo")
 
-    access_token = create_access_token(user_id=user.id, 
-                                       role=user.role, 
-                                       email=user.email,
-                                       active=has_active_subscription(session, user.id))
-    return Token(access_token=access_token, token_type="bearer")
+    access_token = create_access_token(
+        user_id=user.id,
+        role=user.role,
+        email=user.email,
+        active=has_active_subscription(session, user.id),
+    )
+    refresh_token = create_refresh_token(user_id=user.id)
+
+    return Token(access_token=access_token, refresh_token=refresh_token)
 
 
 @router.post("/logout")
@@ -153,3 +180,37 @@ def reset_password(
     session.commit()
 
     return {"detail": "Contraseña actualizada correctamente"}
+
+@router.post("/refresh", response_model=Token)
+def refresh_token(payload: RefreshRequest, session: Session = Depends(get_session)):
+    try:
+        data = jwt.decode(
+            payload.refresh_token,
+            SECRET_KEY,
+            algorithms=[ALGORITHM],
+            audience="aleppi-frontend",
+            issuer="aleppi-backend",
+        )
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Refresh token inválido o expirado")
+
+    if data.get("type") != "refresh":
+        raise HTTPException(status_code=401, detail="Token no es refresh")
+
+    user_id = data.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Token inválido")
+
+    user = session.get(User, int(user_id))
+    if not user or not user.is_active:
+        raise HTTPException(status_code=401, detail="Usuario inválido o inactivo")
+
+    access_token = create_access_token(
+        user_id=user.id,
+        role=user.role,
+        email=user.email,
+        active=has_active_subscription(session, user.id),
+    )
+    new_refresh = create_refresh_token(user_id=user.id)  # opcional: rotación
+
+    return Token(access_token=access_token, refresh_token=new_refresh)
