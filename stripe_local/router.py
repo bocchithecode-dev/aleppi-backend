@@ -143,7 +143,7 @@ def create_checkout_session(
             payment_method_types=["card"],
             line_items=[{"price": price_id, "quantity": 1}],
             customer_email=payload.email,
-            success_url=f"{success_url_base}?session_id={{CHECKOUT_SESSION_ID}}",
+            success_url=f"{success_url_base}?session_id={{CHECKOUT_SESSION_ID}}&transaction_id={tx}",
             cancel_url=cancel_url,
             client_reference_id=str(payload.user_id) if payload.user_id is not None else None,
             metadata={

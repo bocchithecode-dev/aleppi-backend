@@ -35,12 +35,13 @@ def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
 
 
-def create_access_token(*, user_id: int, role: int, email: str) -> str:
+def create_access_token(*, user_id: int, role: int, email: str, active: bool) -> str:
     now = datetime.now()
     payload = {
         "sub": str(user_id),
         "email": str(email),
         "role": int(role),
+        "is_active":bool(active),
         "jti": str(uuid4()),
         "iat": int(now.timestamp()),
         "nbf": int(now.timestamp()),
