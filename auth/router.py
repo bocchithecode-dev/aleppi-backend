@@ -8,7 +8,7 @@ from passlib.context import CryptContext
 from sqlmodel import Session, select
 
 from database import get_session
-from models import User
+from models import User, StripeSubscription
 from .schemas import (
     Token,
     LoginRequest,
@@ -56,6 +56,13 @@ def get_user_by_email(session: Session, email: str) -> Optional[User]:
     statement = select(User).where(User.email == email)
     return session.exec(statement).first()
 
+ACTIVE_STATUSES = {"active", "trialing"}
+def has_active_subscription(session: Session, user_id: int) -> bool:
+    stmt = select(StripeSubscription.id).where(
+        StripeSubscription.user_id == user_id,
+        StripeSubscription.status.in_(ACTIVE_STATUSES),
+    ).limit(1)
+    return session.exec(stmt).first() is not None
 
 # ----------------- endpoints ----------------- #
 
@@ -69,7 +76,10 @@ def login(payload: LoginRequest, session: Session = Depends(get_session)):
     if not user.is_active:
         raise HTTPException(status_code=401, detail="Usuario inactivo")
 
-    access_token = create_access_token(user_id=user.id, role=user.role, email=user.email)
+    access_token = create_access_token(user_id=user.id, 
+                                       role=user.role, 
+                                       email=user.email,
+                                       active=has_active_subscription(session, user.id))
     return Token(access_token=access_token, token_type="bearer")
 
 
