@@ -1,5 +1,5 @@
 from typing import Optional
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, ConfigDict, EmailStr
 from auth.schemas import UserRead
 
 class ProfessionalCreate(BaseModel):
@@ -31,9 +31,8 @@ class ProfessionalRead(BaseModel):
     city: str
     mobile_phone: str
     user: UserRead
-
-    class Config:
-        orm_mode = True
+    
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ProfessionalStatusUpdate(BaseModel):

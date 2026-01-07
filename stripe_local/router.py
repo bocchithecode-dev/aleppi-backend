@@ -99,6 +99,7 @@ class CreateCheckoutSessionRequest(BaseModel):
     email: EmailStr
     price_id: Optional[str] = None
     user_id: Optional[int] = None
+    transaction_id: Optional[str] = None
 
 
 class CheckoutSessionResponse(BaseModel):
@@ -117,9 +118,16 @@ def create_checkout_session(
 ):
     _init_stripe()
 
-    success_url_base = _get_env("STRIPE_SUCCESS_URL", "https://example.com/success")
-    cancel_url = _get_env("STRIPE_CANCEL_URL", "https://example.com/cancel")
+    success_url_base = _get_env("STRIPE_SUCCESS_URL", "http://localhost:3000/profesionales/membresia/success")
+    cancel_url = _get_env("STRIPE_CANCEL_URL", "http://localhost:3000/profesionales/membresia/cancel")
+    tx = (payload.transaction_id or "").strip()
 
+    success_url = f"{success_url_base}?session_id={{CHECKOUT_SESSION_ID}}"
+    cancel_url_final = cancel_url
+
+    if tx:
+        success_url += f"&transaction_id={tx}"
+        cancel_url_final += f"?transaction_id={tx}"
     default_price = _get_env("STRIPE_PRICE_ID_PRO", "")
     price_id = (payload.price_id or default_price).strip()
     if not price_id:
@@ -141,6 +149,7 @@ def create_checkout_session(
             metadata={
                 "user_id": str(payload.user_id) if payload.user_id is not None else "",
                 "chosen_price_id": price_id,
+                "transaction_id": tx
             },
         )
     except Exception:
@@ -225,6 +234,7 @@ def _upsert_subscription(
     current_period_start: Optional[datetime],
     current_period_end: Optional[datetime],
     canceled_at: Optional[datetime],
+    transaction_id: Optional[str] = None, 
 ) -> StripeSubscription:
     sub = db.exec(
         select(StripeSubscription).where(StripeSubscription.stripe_subscription_id == stripe_subscription_id)
@@ -239,6 +249,9 @@ def _upsert_subscription(
         sub.current_period_start = current_period_start
         sub.current_period_end = current_period_end
         sub.canceled_at = canceled_at
+
+        if transaction_id:
+            sub.transaction_id = transaction_id
         sub.updated_at = datetime.now(timezone.utc)
         db.add(sub)
         db.commit()
@@ -255,6 +268,7 @@ def _upsert_subscription(
         current_period_start=current_period_start,
         current_period_end=current_period_end,
         canceled_at=canceled_at,
+        transaction_id=transaction_id or None,  # ✅ NUEVO
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
     )
@@ -374,7 +388,7 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_session)):
             user_id = _safe_int(metadata.get("user_id")) or _safe_int(obj.get("client_reference_id"))
             if not user_id:
                 return {"status": "ok"}
-
+            transaction_id = (metadata.get("transaction_id") or "").strip()  # ✅ NUEVO
             customer_id = obj.get("customer")
             subscription_id = obj.get("subscription")
 
@@ -401,6 +415,7 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_session)):
                         current_period_start=_to_dt_from_unix(sub.get("current_period_start")),
                         current_period_end=_to_dt_from_unix(sub.get("current_period_end")),
                         canceled_at=_to_dt_from_unix(sub.get("canceled_at")),
+                        transaction_id=transaction_id or None,  # ✅ NUEVO
                     )
                 except Exception:
                     logger.exception("No pude retrieve/upsert subscription en checkout.session.completed")
@@ -522,3 +537,143 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_session)):
     except Exception:
         logger.exception("Webhook procesando evento falló (type=%s id=%s)", event_type, event_id)
         return {"status": "ok"}
+
+class ConfirmRequest(BaseModel):
+    session_id: str
+    transaction_id: Optional[str] = None
+
+class ConfirmResponse(BaseModel):
+    ok: bool
+    status: str  # active | pending_webhook | not_paid | invalid | pending
+    subscription_id: Optional[str] = None
+    customer_id: Optional[str] = None
+    synced: bool = False  # ✅ si el confirm ejecutó upsert en esta llamada
+
+
+def _to_dt_from_unix(ts: Optional[int]):
+    if not ts:
+        return None
+    return datetime.fromtimestamp(int(ts), tz=timezone.utc)
+
+
+def _safe_int(v) -> Optional[int]:
+    try:
+        return int(v)
+    except Exception:
+        return None
+
+
+@router.post("/confirm", response_model=ConfirmResponse)
+def confirm_payment(payload: ConfirmRequest, db: Session = Depends(get_session)):
+    _init_stripe()
+
+    # 1) Retrieve checkout session
+    try:
+        s = stripe.checkout.Session.retrieve(payload.session_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="session_id inválido")
+
+    # 2) Validate optional transaction_id matches Stripe metadata (if you set it)
+    meta = s.get("metadata") or {}
+    meta_tx = (meta.get("transaction_id") or "").strip()
+    if payload.transaction_id and meta_tx and payload.transaction_id.strip() != meta_tx:
+        raise HTTPException(status_code=400, detail="transaction_id no coincide")
+
+    session_status = s.get("status")             # complete/open/expired
+    payment_status = s.get("payment_status")     # paid/unpaid/no_payment_required
+    sub_id = s.get("subscription")
+    cus_id = s.get("customer")
+
+    # 3) If not paid/complete, do not reconcile
+    if not (session_status == "complete" and payment_status in ("paid", "no_payment_required")):
+        return ConfirmResponse(
+            ok=False,
+            status="not_paid",
+            subscription_id=sub_id,
+            customer_id=cus_id,
+            synced=False,
+        )
+
+    # 4) If no subscription id, we can't upsert subscription
+    if not sub_id:
+        return ConfirmResponse(
+            ok=False,
+            status="pending",
+            subscription_id=None,
+            customer_id=cus_id,
+            synced=False,
+        )
+
+    # 5) If already in DB -> active
+    already = db.exec(
+        select(StripeSubscription).where(StripeSubscription.stripe_subscription_id == sub_id)
+    ).first()
+
+    if already:
+        return ConfirmResponse(
+            ok=True,
+            status="active",
+            subscription_id=sub_id,
+            customer_id=cus_id,
+            synced=False,
+        )
+
+    # 6) RECONCILE: retrieve subscription from Stripe and upsert into DB
+    try:
+        sub = stripe.Subscription.retrieve(sub_id)
+    except Exception:
+        return ConfirmResponse(
+            ok=False,
+            status="pending_webhook",
+            subscription_id=sub_id,
+            customer_id=cus_id,
+            synced=False,
+        )
+
+    # user_id should come from metadata (recommended) or client_reference_id
+    user_id = _safe_int(meta.get("user_id")) or _safe_int(s.get("client_reference_id"))
+    if not user_id:
+        return ConfirmResponse(
+            ok=False,
+            status="pending_webhook",
+            subscription_id=sub_id,
+            customer_id=cus_id,
+            synced=False,
+        )
+
+    # price_id from subscription items
+    items = (sub.get("items") or {}).get("data") or []
+    price_id = None
+    if items and items[0].get("price"):
+        price_id = items[0]["price"].get("id")
+
+    if not price_id:
+        return ConfirmResponse(
+            ok=False,
+            status="pending_webhook",
+            subscription_id=sub_id,
+            customer_id=cus_id,
+            synced=False,
+        )
+
+    _upsert_subscription(
+        db=db,
+        user_id=user_id,
+        stripe_subscription_id=sub["id"],
+        stripe_customer_id=sub["customer"],
+        price_id=price_id,
+        status_=sub.get("status", "unknown"),
+        cancel_at_period_end=sub.get("cancel_at_period_end", False),
+        current_period_start=_to_dt_from_unix(sub.get("current_period_start")),
+        current_period_end=_to_dt_from_unix(sub.get("current_period_end")),
+        canceled_at=_to_dt_from_unix(sub.get("canceled_at")),
+        transaction_id=(meta_tx or None),  # si implementaste Opción A
+    )
+
+    return ConfirmResponse(
+        ok=True,
+        status="active",
+        subscription_id=sub_id,
+        customer_id=cus_id,
+        synced=True,
+    )

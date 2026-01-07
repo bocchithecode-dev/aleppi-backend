@@ -1,6 +1,6 @@
 # auth/schemas.py
 from typing import Optional
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, ConfigDict, EmailStr
 
 
 class Token(BaseModel):
@@ -27,5 +27,4 @@ class UserRead(BaseModel):
     email: EmailStr
     is_active: bool
     role: int
-    class Config:
-        orm_mode = True
+    model_config = ConfigDict(from_attributes=True)

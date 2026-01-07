@@ -1,7 +1,7 @@
 # auth/router.py
 from datetime import datetime, timedelta
 from typing import Optional
-
+from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, status
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -35,16 +35,20 @@ def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
 
 
-def create_access_token(
-    data: dict,
-    expires_delta: Optional[timedelta] = None,
-) -> str:
-    to_encode = data.copy()
-    expire = datetime.utcnow() + (
-        expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    )
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+def create_access_token(*, user_id: int, role: int, email: str) -> str:
+    now = datetime.now()
+    payload = {
+        "sub": str(user_id),
+        "email": str(email),
+        "role": int(role),
+        "jti": str(uuid4()),
+        "iat": int(now.timestamp()),
+        "nbf": int(now.timestamp()),
+        "exp": int((now + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)).timestamp()),
+        "iss": 'aleppi-backend',
+        "aud": 'aleppi-frontend',
+    }
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 
 def get_user_by_email(session: Session, email: str) -> Optional[User]:
@@ -57,21 +61,15 @@ def get_user_by_email(session: Session, email: str) -> Optional[User]:
 @router.post("/login", response_model=Token)
 def login(payload: LoginRequest, session: Session = Depends(get_session)):
     user = get_user_by_email(session, payload.email)
+    if not user or not verify_password(payload.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Credenciales inválidas")
 
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Credenciales inválidas",
-        )
+    # IMPORTANTÍSIMO: checar aquí también
+    if not user.is_active:
+        raise HTTPException(status_code=401, detail="Usuario inactivo")
 
-    if not verify_password(payload.password, user.hashed_password):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Credenciales inválidas",
-        )
-
-    access_token = create_access_token({"sub": str(user.id)})
-    return Token(access_token=access_token)
+    access_token = create_access_token(user_id=user.id, role=user.role, email=user.email)
+    return Token(access_token=access_token, token_type="bearer")
 
 
 @router.post("/logout")

@@ -141,7 +141,7 @@ class StripeSubscription(SQLModel, TimestampMixin, UpdatedTimestampMixin, table=
     current_period_start: Optional[datetime] = None
     current_period_end: Optional[datetime] = None
     canceled_at: Optional[datetime] = None
-
+    transaction_id: Optional[str] = Field(default=None, index=True)
     user: "User" = Relationship(
         sa_relationship=relationship("User", back_populates="stripe_subscriptions")
     )
