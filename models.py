@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional, Dict, Any
+from datetime import time
+
+from typing import Optional, Dict, Any, List
 from uuid import UUID, uuid4
 
 from sqlmodel import SQLModel, Field, Relationship
@@ -51,6 +53,52 @@ class ProfessionalBase(SQLModel):
     active: bool
 
 
+class ProfessionalSocials(SQLModel, table=True):
+    __tablename__ = "professional_socials"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    professional_id: int = Field(foreign_key="professionals.id", index=True, unique=True)
+
+    web: Optional[str] = None
+    facebook: Optional[str] = None
+    instagram: Optional[str] = None
+    youtube: Optional[str] = None
+
+    professional: "Professional" = Relationship(
+        sa_relationship=relationship("Professional", back_populates="socials")
+    )
+
+
+class ProfessionalSchedule(SQLModel, table=True):
+    __tablename__ = "professional_schedules"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    professional_id: int = Field(foreign_key="professionals.id", index=True)
+
+    day: str
+    open: Optional[time] = None
+    close: Optional[time] = None
+    is_closed: bool = False
+
+    professional: "Professional" = Relationship(
+        sa_relationship=relationship("Professional", back_populates="schedules")
+    )
+
+class ProfessionalReview(SQLModel, table=True):
+    __tablename__ = "professional_reviews"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    professional_id: int = Field(foreign_key="professionals.id", index=True)
+    user_id: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
+
+    rating: int
+    comment: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    professional: "Professional" = Relationship(
+        sa_relationship=relationship("Professional", back_populates="reviews")
+    )
+
 class Professional(ProfessionalBase, table=True):
     __tablename__ = "professionals"
 
@@ -59,6 +107,18 @@ class Professional(ProfessionalBase, table=True):
 
     user: "User" = Relationship(
         sa_relationship=relationship("User", back_populates="professional")
+    )
+
+    socials: Optional["ProfessionalSocials"] = Relationship(
+        sa_relationship=relationship("ProfessionalSocials", back_populates="professional", uselist=False)
+    )
+
+    schedules: List["ProfessionalSchedule"] = Relationship(
+        sa_relationship=relationship("ProfessionalSchedule", back_populates="professional")
+    )
+
+    reviews: List["ProfessionalReview"] = Relationship(
+        sa_relationship=relationship("ProfessionalReview", back_populates="professional")
     )
 
 # -------------------------
