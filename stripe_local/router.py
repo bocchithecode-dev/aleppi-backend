@@ -94,6 +94,7 @@ class CreateCheckoutSessionRequest(BaseModel):
     user_id: Optional[int] = None
     transaction_id: Optional[str] = None
     mode: Optional[str] = "subscription"  # 'subscription' o 'payment' (pago único)
+    discount_code: Optional[str] = None  # Promotion code legible (ej. "PROMO20") o coupon ID de Stripe
 
 
 class CheckoutSessionResponse(BaseModel):
@@ -110,6 +111,31 @@ class CancelSubscriptionResponse(BaseModel):
     ok: bool
     status: str
     message: str
+
+
+# -----------------------------
+# Oxxo Schemas
+# -----------------------------
+class OxxoPaymentRequest(BaseModel):
+    email: EmailStr
+    user_id: int
+    amount: int          # centavos MXN, e.g. 50000 = $500.00 MXN
+    transaction_id: Optional[str] = None
+
+
+class OxxoVoucherResponse(BaseModel):
+    payment_intent_id: str
+    amount: int
+    currency: str
+    oxxo_number: Optional[str] = None
+    hosted_voucher_url: Optional[str] = None
+    expires_after: Optional[datetime] = None
+
+
+class OxxoStatusResponse(BaseModel):
+    payment_intent_id: str
+    status: str
+    paid_at: Optional[datetime] = None
 
 
 # -----------------------------
@@ -155,6 +181,25 @@ def create_checkout_session(
     if allowed and price_id not in allowed:
         raise HTTPException(status_code=400, detail="price_id no permitido.")
 
+    # Resolver discount_code si viene
+    discounts = []
+    raw_code = (payload.discount_code or "").strip()
+    if raw_code:
+        # Intentar primero como promotion code legible (ej. "PROMO20")
+        try:
+            promo_results = stripe.PromotionCode.list(code=raw_code, active=True, limit=1)
+            if promo_results.data:
+                discounts = [{"promotion_code": promo_results.data[0]["id"]}]
+            else:
+                # Intentar como coupon ID directo (ej. "KzKOegFq")
+                stripe.Coupon.retrieve(raw_code)
+                discounts = [{"coupon": raw_code}]
+        except stripe.error.StripeError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Código de descuento '{raw_code}' no encontrado o inactivo.",
+            )
+
     try:
         session = stripe.checkout.Session.create(
             mode=checkout_mode,  # Soporta 'subscription' o 'payment'
@@ -172,10 +217,159 @@ def create_checkout_session(
                 "transaction_id": tx,
                 "mode": checkout_mode,
             },
+            **({"discounts": discounts} if discounts else {}),
         )
     except Exception:
         logger.exception("Error creando sesión Stripe (checkout)")
         raise HTTPException(status_code=500, detail="Error creando sesión Stripe")
+
+    return CheckoutSessionResponse(checkout_url=session.url, session_id=session.id)
+
+
+# -----------------------------
+# Test Schemas - Códigos de descuento
+# -----------------------------
+class TestCheckoutWithCouponRequest(BaseModel):
+    email: EmailStr
+    coupon_id: str  # ID del cupón de Stripe, ej. "KzKOegFq"
+    price_id: Optional[str] = None
+    mode: Optional[str] = "subscription"
+
+
+class TestCheckoutWithPromoCodeRequest(BaseModel):
+    email: EmailStr
+    promotion_code: str  # Código legible, ej. "DESCUENTO20"
+    price_id: Optional[str] = None
+    mode: Optional[str] = "subscription"
+
+
+# -----------------------------
+# API (TEST): Checkout aplicando un Cupón por ID
+# -----------------------------
+@router.post(
+    "/test/checkout-with-coupon",
+    response_model=CheckoutSessionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def test_checkout_with_coupon(
+    payload: TestCheckoutWithCouponRequest,
+    db: Session = Depends(get_session),
+):
+    """Endpoint de prueba: crea un Checkout Session aplicando un cupón por su ID de Stripe (ej. 'KzKOegFq')."""
+    _init_stripe()
+
+    try:
+        stripe.Coupon.retrieve(payload.coupon_id)
+    except stripe.error.StripeError:
+        raise HTTPException(status_code=400, detail="El coupon_id no existe o no es válido.")
+
+    success_url_base = _get_env(
+        "STRIPE_SUCCESS_URL", "https://aleppiweb.vercel.app/profesionales/membresia/success"
+    )
+    cancel_url = _get_env(
+        "STRIPE_CANCEL_URL", "https://aleppiweb.vercel.app/profesionales/membresia/cancel"
+    )
+    success_url = f"{success_url_base}?session_id={{CHECKOUT_SESSION_ID}}"
+
+    default_price = _get_env("STRIPE_PRICE_ID_PRO", "")
+    price_id = (payload.price_id or default_price).strip()
+    if not price_id:
+        raise HTTPException(status_code=500, detail="Falta STRIPE_PRICE_ID_PRO o price_id.")
+
+    checkout_mode = payload.mode if payload.mode in ("subscription", "payment") else "subscription"
+
+    try:
+        session = stripe.checkout.Session.create(
+            mode=checkout_mode,
+            payment_method_types=["card"],
+            line_items=[{"price": price_id, "quantity": 1}],
+            customer_email=payload.email,
+            discounts=[{"coupon": payload.coupon_id}],
+            success_url=success_url,
+            cancel_url=cancel_url,
+            metadata={
+                "test": "discount_coupon",
+                "coupon_id": payload.coupon_id,
+            },
+        )
+    except stripe.error.StripeError as e:
+        logger.exception("Error creando checkout de prueba con cupón: %s", str(e))
+        raise HTTPException(
+            status_code=400,
+            detail=f"Error Stripe: {getattr(e, 'user_message', None) or str(e)}",
+        )
+
+    return CheckoutSessionResponse(checkout_url=session.url, session_id=session.id)
+
+
+# -----------------------------
+# API (TEST): Checkout aplicando un Promotion Code
+# -----------------------------
+@router.post(
+    "/test/checkout-with-promo-code",
+    response_model=CheckoutSessionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def test_checkout_with_promo_code(
+    payload: TestCheckoutWithPromoCodeRequest,
+    db: Session = Depends(get_session),
+):
+    """Endpoint de prueba: crea un Checkout Session resolviendo un código de promoción legible (ej. 'DESCUENTO20')."""
+    _init_stripe()
+
+    try:
+        promo_codes = stripe.PromotionCode.list(
+            code=payload.promotion_code, active=True, limit=1
+        )
+    except stripe.error.StripeError as e:
+        logger.exception("Error buscando promotion code: %s", str(e))
+        raise HTTPException(
+            status_code=400,
+            detail=f"Error Stripe: {getattr(e, 'user_message', None) or str(e)}",
+        )
+
+    if not promo_codes.data:
+        raise HTTPException(
+            status_code=404, detail="Código de promoción no encontrado o inactivo."
+        )
+
+    promo_code_id = promo_codes.data[0]["id"]
+
+    success_url_base = _get_env(
+        "STRIPE_SUCCESS_URL", "https://aleppiweb.vercel.app/profesionales/membresia/success"
+    )
+    cancel_url = _get_env(
+        "STRIPE_CANCEL_URL", "https://aleppiweb.vercel.app/profesionales/membresia/cancel"
+    )
+    success_url = f"{success_url_base}?session_id={{CHECKOUT_SESSION_ID}}"
+
+    default_price = _get_env("STRIPE_PRICE_ID_PRO", "")
+    price_id = (payload.price_id or default_price).strip()
+    if not price_id:
+        raise HTTPException(status_code=500, detail="Falta STRIPE_PRICE_ID_PRO o price_id.")
+
+    checkout_mode = payload.mode if payload.mode in ("subscription", "payment") else "subscription"
+
+    try:
+        session = stripe.checkout.Session.create(
+            mode=checkout_mode,
+            payment_method_types=["card"],
+            line_items=[{"price": price_id, "quantity": 1}],
+            customer_email=payload.email,
+            discounts=[{"promotion_code": promo_code_id}],
+            success_url=success_url,
+            cancel_url=cancel_url,
+            metadata={
+                "test": "discount_promo_code",
+                "promotion_code": payload.promotion_code,
+            },
+        )
+    except stripe.error.StripeError as e:
+        logger.exception("Error creando checkout de prueba con promo code: %s", str(e))
+        raise HTTPException(
+            status_code=400,
+            detail=f"Error Stripe: {getattr(e, 'user_message', None) or str(e)}",
+        )
 
     return CheckoutSessionResponse(checkout_url=session.url, session_id=session.id)
 
@@ -247,6 +441,103 @@ def cancel_subscription(
     except Exception:
         logger.exception("Error interno cancelando la suscripción.")
         raise HTTPException(status_code=500, detail="Fallo interno al cancelar suscripción.")
+
+
+# -----------------------------
+# API: Create Oxxo PaymentIntent
+# -----------------------------
+@router.post(
+    "/oxxo/payment-intent",
+    response_model=OxxoVoucherResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_oxxo_payment_intent(
+    payload: OxxoPaymentRequest,
+    db: Session = Depends(get_session),
+):
+    _init_stripe()
+
+    try:
+        stripe_customer_id = _get_or_create_stripe_customer(
+            db, user_id=payload.user_id, email=payload.email
+        )
+
+        pi = stripe.PaymentIntent.create(
+            amount=payload.amount,
+            currency="mxn",
+            payment_method_types=["oxxo"],
+            customer=stripe_customer_id,
+            receipt_email=payload.email,
+            payment_method_options={"oxxo": {"expires_after_days": 3}},
+            payment_method_data={"type": "oxxo"},
+            confirm=True,
+            metadata={
+                "user_id": str(payload.user_id),
+                "transaction_id": payload.transaction_id or "",
+            },
+        )
+
+        next_action = pi.get("next_action") or {}
+        oxxo_details = next_action.get("oxxo_display_details") or {}
+
+        expires_after_raw = oxxo_details.get("expires_after")
+        expires_after_dt = _to_dt_from_unix(expires_after_raw) if expires_after_raw else None
+
+        _insert_invoice(
+            db=db,
+            stripe_invoice_id=pi["id"],
+            stripe_customer_id=stripe_customer_id,
+            stripe_subscription_id=None,
+            amount_paid=0,
+            amount_due=payload.amount,
+            currency="mxn",
+            status_="pending",
+            paid_at=None,
+            raw_json=dict(pi),
+        )
+
+        return OxxoVoucherResponse(
+            payment_intent_id=pi["id"],
+            amount=pi["amount"],
+            currency=pi["currency"],
+            oxxo_number=oxxo_details.get("number"),
+            hosted_voucher_url=oxxo_details.get("hosted_voucher_url"),
+            expires_after=expires_after_dt,
+        )
+
+    except stripe.error.StripeError as e:
+        logger.exception("StripeError creando Oxxo PaymentIntent: %s", str(e))
+        raise HTTPException(
+            status_code=400,
+            detail=f"Error Stripe: {getattr(e, 'user_message', None) or str(e)}",
+        )
+    except Exception:
+        logger.exception("Error interno creando Oxxo PaymentIntent")
+        raise HTTPException(status_code=500, detail="Error interno al crear pago Oxxo.")
+
+
+# -----------------------------
+# API: Get Oxxo Payment Status
+# -----------------------------
+@router.get("/oxxo/status/{payment_intent_id}", response_model=OxxoStatusResponse)
+def get_oxxo_status(payment_intent_id: str, db: Session = Depends(get_session)):
+    record = db.exec(
+        select(StripeInvoice).where(
+            StripeInvoice.stripe_invoice_id == payment_intent_id
+        )
+    ).first()
+
+    if not record:
+        raise HTTPException(
+            status_code=404,
+            detail="No se encontró registro de pago Oxxo con ese payment_intent_id.",
+        )
+
+    return OxxoStatusResponse(
+        payment_intent_id=payment_intent_id,
+        status=record.status or "unknown",
+        paid_at=record.paid_at,
+    )
 
 
 # -----------------------------
@@ -414,6 +705,18 @@ def _insert_invoice(
     return row
 
 
+def _get_or_create_stripe_customer(db: Session, user_id: int, email: str) -> str:
+    existing = db.exec(
+        select(StripeCustomer).where(StripeCustomer.user_id == user_id)
+    ).first()
+    if existing:
+        return existing.stripe_customer_id
+
+    customer = stripe.Customer.create(email=email, metadata={"user_id": str(user_id)})
+    _upsert_customer(db, user_id=user_id, stripe_customer_id=customer["id"], email=email)
+    return customer["id"]
+
+
 def _activate_professional(db: Session, user_id: int) -> None:
     professional = db.exec(
         select(Professional).where(Professional.user_id == user_id)
@@ -570,8 +873,50 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_session)):
         elif event_type == "payment_intent.succeeded":
             metadata = obj.get("metadata") or {}
             user_id = _safe_int(metadata.get("user_id"))
+            pi_id = obj.get("id")
+            customer_id = obj.get("customer")
+            email = obj.get("receipt_email")
+
+            if customer_id and user_id:
+                _upsert_customer(db, user_id=user_id, stripe_customer_id=customer_id, email=email)
+
+            # Actualizar registro Oxxo si existe para este PaymentIntent
+            if pi_id:
+                invoice_record = db.exec(
+                    select(StripeInvoice).where(StripeInvoice.stripe_invoice_id == pi_id)
+                ).first()
+                if invoice_record:
+                    invoice_record.status = "paid"
+                    invoice_record.amount_paid = obj.get("amount_received")
+                    invoice_record.paid_at = datetime.now(timezone.utc)
+                    db.add(invoice_record)
+                    db.commit()
+                    logger.info("Oxxo invoice actualizada a 'paid': pi_id=%s", pi_id)
+
             if user_id:
                 _activate_professional(db, user_id)
+            return {"status": "ok"}
+
+        # -----------------------------------------
+        # B2) Oxxo voucher vencido sin pago
+        # -----------------------------------------
+        elif event_type == "payment_intent.payment_failed":
+            pi_id = obj.get("id")
+            last_error = (obj.get("last_payment_error") or {}).get("message", "unknown")
+            logger.warning(
+                "payment_intent.payment_failed: pi_id=%s error=%s", pi_id, last_error
+            )
+
+            if pi_id:
+                invoice_record = db.exec(
+                    select(StripeInvoice).where(StripeInvoice.stripe_invoice_id == pi_id)
+                ).first()
+                if invoice_record:
+                    invoice_record.status = "failed"
+                    db.add(invoice_record)
+                    db.commit()
+                    logger.info("Oxxo invoice marcada como 'failed': pi_id=%s", pi_id)
+
             return {"status": "ok"}
 
         # -----------------------------------------

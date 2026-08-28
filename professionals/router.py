@@ -405,6 +405,7 @@ def delete_professional(
 
     if professional.deleted_at is None:
         professional.deleted_at = datetime.utcnow()
+        professional.status = "Inactivo"
         session.add(professional)
         session.commit()
     return
