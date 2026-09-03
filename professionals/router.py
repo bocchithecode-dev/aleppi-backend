@@ -92,7 +92,7 @@ async def create_professional(
     professional_status: str = Form("Inactivo"),
     schedules: str = Form(None),
     photo_file: UploadFile | None = File(None),
-    license_file: UploadFile = File(...),
+    license_file: UploadFile | None = File(None),
     session: Session = Depends(get_session),
 ):
     logger.info(
@@ -133,7 +133,9 @@ async def create_professional(
         url_photo = await storage_service.upload_file(photo_file, "uploads/photos")
 
     # Upload license file to Azure Blob Storage
-    license_file_path = await storage_service.upload_file(license_file, "uploads/licenses")
+    license_file_path = None
+    if license_file is not None:
+        license_file_path = await storage_service.upload_file(license_file, "uploads/licenses")
 
     professional = Professional(
         user_id=user.id,
